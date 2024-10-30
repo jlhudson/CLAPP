@@ -1,9 +1,13 @@
+import warnings
 from collections import defaultdict
 from datetime import timedelta
 
 from dataset import *
 from importer import import_data
 from reportlogger import report_logger
+from unfilled_shift_report import UnfilledShiftReport  # Import the new class
+
+warnings.filterwarnings("ignore", message="Cannot parse header or footer so it will be ignored")
 
 
 class ReportGenerator:
@@ -22,16 +26,22 @@ class ReportGenerator:
             )
         )
 
+        self.generate_unassigned_shifts_report()
+        input(f"Unassigned Shift Report Completed. Press Enter to continue...")
+
         for employee in sorted_employees:
             # Sort shifts within each employee by start date and time
             employee.shifts = sorted(employee.shifts, key=lambda shift: (shift.start.date(), shift.start.time()))
 
             # Sort leave within each employee by date and then status
-            employee.leave_dates = sorted(employee.leave_dates, key=lambda leave: (leave.date, leave.status.name))
-
+            employee.leave_dates = sorted(
+                [leave for leave in employee.leave_dates if leave.status],
+                key=lambda leave: (leave.date, leave.status.display_name)
+            )
             # Log employee info after sorting for each
             print("\n")
             report_logger.info(f"{str(employee)}")
+            self.display_leave_info(employee) # Prints the upcoming Leave for this employee.
 
             if not self.validate_employee(employee):
                 continue
@@ -46,7 +56,9 @@ class ReportGenerator:
                     self.validate_shift_overlaps(employee) &
                     self.validate_on_call_restrictions(employee) &
                     self.validate_minimum_breaks_and_daily_limits(employee) &
-                    self.validate_sleepover_shifts(employee)
+                    self.validate_sleepover_shifts(employee) &
+                    self.validate_fortnight_hours(employee) &
+                    self.check_pending_or_denied_leave(employee)
             )
 
             if all_checks_passed:
@@ -545,8 +557,8 @@ class ReportGenerator:
         sleepover_window_hours = 12
 
         for i, shift in enumerate(employee_shifts):
-            # Identify the sleepover shift (7-8 hours, isAttended=False, spanning midnight)
-            if 7 <= shift.gross_hours <= 8 and not shift.is_attended and shift.start.hour < 23 and shift.end.hour > 0:
+            # Identify the sleepover shift (8 hours, isAttended=False, spanning midnight)
+            if shift.gross_hours <= 8 and not shift.is_attended and shift.start.hour < 23 and shift.end.hour > 0:
                 sleepover_shift = shift
 
                 # Check for the 4-hour component before or after the sleepover shift
@@ -616,6 +628,32 @@ class ReportGenerator:
 
         return not conflicts_found
 
+    def validate_fortnight_hours(self, employee: Employee) -> bool:
+        """Check if the employee has less than 24 hours worked in a fortnight, including applicable leave."""
+        hours_by_paycycle = defaultdict(float)
+
+        # Aggregate hours from shifts
+        for shift in employee.shifts:
+            hours_by_paycycle[shift.pay_cycle] += shift.net_hours if shift.is_attended else shift.gross_hours
+
+        # Include hours from approved leave types that count toward hours worked
+        for leave in employee.leave_dates:
+            if leave.status.is_approved and leave.leave_type.counts_towards_hours:
+                pay_cycle = Shift.calculate_pay_cycle(leave.date)
+                hours_by_paycycle[pay_cycle] += leave.calculate_hours()
+
+        # Check each pay cycle for minimum hour requirement
+        conflicts_found = False
+        for pay_cycle, total_hours in hours_by_paycycle.items():
+            if total_hours < 12:  # It's actually 24, but Employees fall below this all the time, we only need the worst case scenarios.
+                conflicts_found = True
+                report_logger.warning(
+                    f"{employee.name} has less than 24 hours in Paycycle {self.get_paycycle_dates(pay_cycle)} "
+                    f"(Total: {total_hours:.2f} hours)"
+                )
+
+        return not conflicts_found
+
     @staticmethod
     def get_paycycle_dates(pay_cycle_num: int) -> str:
         """Return the start and end dates of a given pay cycle number in the specified format."""
@@ -628,6 +666,48 @@ class ReportGenerator:
 
         # Format the result
         return f"{pay_cycle_num} from {start_date.strftime('%a %d/%m')} - {end_date.strftime('%a %d/%m')}"
+
+    def generate_unassigned_shifts_report(self):
+        # Create and run the unfilled shift report
+        unfilled_shift_report = UnfilledShiftReport(dataset)
+        unfilled_shift_report.generate_report()
+
+    def display_leave_info(self, employee: Employee):
+        """Display approved leave ranges for the employee."""
+        approved_leaves = sorted(
+            [leave for leave in employee.leave_dates if leave.status == LeaveStatus.APPROVED],
+            key=lambda leave: leave.date
+        )
+
+        leave_ranges = []
+        current_range = None
+
+        for leave in approved_leaves:
+            if current_range and leave.date == current_range[-1] + timedelta(days=1):
+                current_range.append(leave.date)
+            else:
+                if current_range:
+                    leave_ranges.append(f"{current_range[0].strftime('%d/%m')} - {current_range[-1].strftime('%d/%m')}")
+                current_range = [leave.date]
+
+        if current_range:
+            leave_ranges.append(f"{current_range[0].strftime('%d/%m')} - {current_range[-1].strftime('%d/%m')}")
+
+        if leave_ranges:
+            report_logger.info(f"Employee: {employee.name}, Approved Leave Ranges: {', '.join(leave_ranges)}")
+
+    def check_pending_or_denied_leave(self, employee: Employee) -> bool:
+        """Check for any pending or denied leave within the next 45 days and return False if found."""
+        current_date = datetime.now().date()
+        check_period = current_date + timedelta(days=45)
+
+        action_required = False
+        for leave in employee.leave_dates:
+            if leave.status in {LeaveStatus.REQUESTED, LeaveStatus.DENIED} and current_date <= leave.date <= check_period:
+                action_required = True
+                report_logger.warning(f"Action Required - Employee: {employee.name}, Leave: {leave}")
+
+        return not action_required
 
 
 if __name__ == "__main__":

@@ -30,6 +30,10 @@ class ReportLogger:
     def error(self, message: str):
         self.log(ReportLevel.ERROR, message)
 
+    def clean(self, message: str):
+        """Outputs only the message string without additional formatting."""
+        print(message)
 
-# Example usage of the logger, set at DEBUG level by default
+
+# Example usage of the logger, set at INFO level by default
 report_logger = ReportLogger(ReportLevel.INFO)

@@ -46,7 +46,7 @@ def import_data(folder_path=".") -> DataSet:
 
     process_main_roster(df_roster, dataset)
 
-    # Load and validate the Leave file
+    # Load and validate the Leave file, then process relevant leave
     leave_file_path = os.path.join(folder_path, leave_files[0])
     print(f"Processing leave report file: {leave_files[0]}")
     df_leave = pd.read_excel(leave_file_path)
@@ -61,10 +61,8 @@ def import_data(folder_path=".") -> DataSet:
         print(f"Expected headers: {expected_headers_leave}")
         sys.exit(1)
 
-    process_leave_report(df_leave, dataset)
-
-    # Debugging print to check the number of employees after loading files
-    print(f"Total employees loaded: {len(dataset.employees)}")
+    # Only process leave entries that are for today or future dates
+    process_leave_report(df_leave[df_leave['Start Date'] >= pd.Timestamp(datetime.now().date())], dataset)
 
     # Sort and finalize dataset
     for employee in dataset.employees.values():
@@ -74,54 +72,8 @@ def import_data(folder_path=".") -> DataSet:
     return dataset
 
 
-def process_main_roster(df: pd.DataFrame, dataset: DataSet):
-    """Processes the main roster data to add employees and their shifts."""
-    ignore_keywords = ["DNR", "UNABLE", "CANCELLED"]
-    for _, row in df.iterrows():
-        name = str(row['Employee']).strip()
-        roster_code = str(row['Employee Roster Name']).strip()
-        if not name or not roster_code or any(keyword in name.upper() for keyword in ignore_keywords):
-            continue
-
-        employee_code = row['Employee Code']
-        location = str(row['Location']).strip()
-        department = str(row['Department']).strip()
-        role = str(row['Role']).strip()
-        work_area = WorkArea(location, department, role)
-
-        # Convert strings to enums using from_name
-        employment_type_str = row['Employment Type']
-        employment_type = EmploymentType.from_name(employment_type_str)
-
-        contract_status = ContractStatus.from_roster_name(roster_code)
-        date_str = str(row['Date']).split(" ")[0]
-        start_time_str = row['Start Time']
-        end_time_str = row['End Time']
-
-        published = bool(row['Published'])
-        comment = row['Comments']
-        is_attended = not bool(row['Non Attended'])
-
-        start_datetime = datetime.fromisoformat(f"{date_str}T{start_time_str}")
-        end_datetime = datetime.fromisoformat(f"{date_str}T{end_time_str}")
-        if end_datetime < start_datetime:
-            end_datetime += timedelta(days=1)
-
-        pay_cycle = Shift.calculate_pay_cycle(start_datetime)
-        shift = Shift(start=start_datetime, end=end_datetime, work_area=work_area, published=published,
-                      comment=comment, is_attended=is_attended, pay_cycle=pay_cycle)
-
-        if pd.notna(employee_code):
-            if employee_code not in dataset.employees:
-                employee = Employee(name, employee_code, roster_code, employment_type, contract_status)
-                dataset.add_employee(employee)
-            dataset.employees[employee_code].add_shift(shift)
-        else:
-            dataset.add_unassigned_shift(shift)
-
-
 def process_leave_report(df: pd.DataFrame, dataset: DataSet):
-    """Processes the leave report data to update leave information for employees, with datetime handling."""
+    """Processes the leave report data to update leave information for employees, filtering by today's date."""
     required_headers = {'Emp Code', 'Leave Type', 'Start Date', 'End Date', 'Status', 'Requested At', 'Hours'}
     found_headers = set(df.columns)
     missing_headers = required_headers - found_headers
@@ -132,7 +84,7 @@ def process_leave_report(df: pd.DataFrame, dataset: DataSet):
     for _, row in df.iterrows():
         employee_code = str(row['Emp Code']).strip()
         leave_type_str = str(row['Leave Type']).strip()
-        status = LeaveStatus.from_name(row['Status'])  # This already returns a LeaveStatus enum instance
+        status = LeaveStatus.from_name(row['Status'])  # Returns a LeaveStatus enum instance
         requested_at = pd.to_datetime(row['Requested At'])
         hours = round(min(row['Hours'], 7.6), 2)
 
@@ -156,7 +108,7 @@ def process_leave_report(df: pd.DataFrame, dataset: DataSet):
                 else:
                     leave_entry = Leave(
                         date=leave_day,
-                        status=status,  # Assigning the enum instance directly
+                        status=status,
                         requested_at=requested_at,
                         hours=hours,
                         leave_type=leave_type
@@ -164,4 +116,72 @@ def process_leave_report(df: pd.DataFrame, dataset: DataSet):
                     employee.add_leave(leave_entry)
         else:
             report_logger.warning(f"Employee code {employee_code} not found in dataset; leave entry skipped.")
+
+
+def process_main_roster(df: pd.DataFrame, dataset: DataSet):
+    """Processes the main roster data, adding shifts as assigned or unassigned based on presence of Employee and Roster Name."""
+    ignore_keywords = ["DNR", "UNABLE", "CANCELLED", "NOT WORKED"]
+    unassigned_shift_count = 0  # Track number of unassigned shifts
+
+    for _, row in df.iterrows():
+        # Fetch `Employee` and `Employee Roster Name`
+        name = str(row['Employee']).strip() if pd.notna(row['Employee']) else ""
+        roster_code = str(row['Employee Roster Name']).strip() if pd.notna(row['Employee Roster Name']) else ""
+
+        # Identify unassigned shifts: Employee Name or Roster Name is blank or null
+        is_unassigned = not name or not roster_code
+
+        # Parse common shift details
+        location = str(row['Location']).strip()
+        department = str(row['Department']).strip()
+        role = str(row['Role']).strip()
+        work_area = WorkArea(location, department, role)
+
+        # Parse shift date and time
+        date_str = str(row['Date']).split(" ")[0]
+        start_time_str = row['Start Time']
+        end_time_str = row['End Time']
+        published = bool(row['Published'])
+        comment = row['Comments']
+        is_attended = not bool(row['Non Attended'])
+
+        start_datetime = datetime.fromisoformat(f"{date_str}T{start_time_str}")
+        end_datetime = datetime.fromisoformat(f"{date_str}T{end_time_str}")
+        if end_datetime < start_datetime:
+            end_datetime += timedelta(days=1)
+
+        pay_cycle = Shift.calculate_pay_cycle(start_datetime)
+        shift = Shift(
+            start=start_datetime,
+            end=end_datetime,
+            work_area=work_area,
+            published=published,
+            comment=comment,
+            is_attended=is_attended,
+            pay_cycle=pay_cycle
+        )
+
+        # Add the shift to the appropriate list based on assignment status
+        if is_unassigned:
+            dataset.add_unassigned_shift(shift)
+            unassigned_shift_count += 1
+        else:
+            # Only process assigned shifts if they don't contain ignored keywords
+            if any(keyword in name.upper() for keyword in ignore_keywords):
+                continue
+
+            employee_code = row['Employee Code']
+            employment_type_str = row['Employment Type']
+            employment_type = EmploymentType.from_name(employment_type_str)
+            contract_status = ContractStatus.from_roster_name(roster_code)
+
+            # Add the employee if they don't already exist in the dataset
+            if pd.notna(employee_code):
+                if employee_code not in dataset.employees:
+                    employee = Employee(name, employee_code, roster_code, employment_type, contract_status)
+                    dataset.add_employee(employee)
+                dataset.employees[employee_code].add_shift(shift)
+
+    # Log the count of unassigned shifts to confirm correct processing
+    report_logger.info(f"Unassigned Shifts Imported: {unassigned_shift_count}")
 

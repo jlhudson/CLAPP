@@ -42,7 +42,6 @@ class ContractStatus(Enum):
                 return status
         return cls.UNKNOWN
 
-
     @staticmethod
     def from_roster_name(roster_name: str):
         if "*" in roster_name:
@@ -89,6 +88,7 @@ class LeaveType(Enum):
     UNPAID_PERSONAL_CARERS_LEAVE = ("Unpaid Personal/Carers Leave", False)
     CASUAL_COMPASSIONATE_LEAVE = ("Casual Compassionate Leave (unpaid)", False)
     PERSONAL_CARERS_LEAVE_CERT = ("Personal/Carers Leave w/ Cert.", True)
+    PUBLIC_HOLIDAY_NOT_WORKED = ("PH Not Worked", False)
 
     def __init__(self, display_name: str, counts_towards_hours: bool):
         self.display_name = display_name  # Changed from `self.name` to avoid conflict
@@ -136,7 +136,6 @@ class Shift:
             return 0.0
         return round(self.gross_hours, 2)
 
-
     def __str__(self):
         start_date = self.start.strftime('%a %d/%m')
         start_str = self.start.strftime('%H%M')
@@ -158,7 +157,7 @@ class Shift:
 class Leave:
     def __init__(self, date: datetime, status: LeaveStatus, requested_at: datetime, hours: float, leave_type: LeaveType):
         self.date = date
-        self.status = status  # No need for `upper()`; status is a LeaveStatus instance
+        self.status = status
         self.requested_at = requested_at
         self.hours = hours
         self.leave_type = leave_type  # LeaveType enum instance
@@ -170,7 +169,6 @@ class Leave:
     def __str__(self):
         leave_date_str = self.date.strftime('%a %d/%m')
         return f"Leave on {leave_date_str} ({self.leave_type.display_name}, {self.status.display_name}, {self.calculate_hours()} Hrs)"
-
 
 
 class Employee:
